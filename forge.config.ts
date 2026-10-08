@@ -7,7 +7,6 @@ import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 import { PublisherGithub } from '@electron-forge/publisher-github';
-import { GITHUB_CONFIG } from './src/main/config';
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -22,7 +21,6 @@ const config: ForgeConfig = {
       iconUrl: 'https://img.picui.cn/free/2025/06/28/685f5bdde3af6.ico',
       authors: '阿酒(zack)',
       setupExe: 'Setup.exe',
-      remoteReleases: `${GITHUB_CONFIG.PROXY}/https://github.com/zack24q/hammer/releases/latest/download`,
     }),
     // new MakerZIP({}, ['darwin']),
     // new MakerRpm({}),
