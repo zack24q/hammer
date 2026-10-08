@@ -1,7 +1,7 @@
 {
   "name": "hammer",
   "productName": "锤子",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "一把锤子，专门敲打阿B直播",
   "main": ".vite/build/main.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "make": "electron-forge make",
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx .",
+    "test:streaming": "node -r ts-node/register/transpile-only --test tests/streaming-regressions.test.cjs",
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,css,scss,md}\"",
     "format:check": "prettier --check \"**/*.{js,jsx,ts,tsx,json,css,scss,md}\""
   },

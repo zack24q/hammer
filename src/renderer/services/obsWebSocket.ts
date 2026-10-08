@@ -1,6 +1,7 @@
 import { OBSWebSocket } from 'obs-websocket-js';
 import { Song } from '../store/songStore';
 import { getInitialOBSConfig } from '../store/settingStore';
+import { configureOBSStreamConnection } from './obsStreaming';
 
 // OBS WebSocket 配置接口
 interface OBSConfig {
@@ -62,6 +63,18 @@ class OBSWebSocketService {
   // 检查连接状态
   isConnectedToOBS(): boolean {
     return this.isConnected;
+  }
+
+  async configureStream(server: string, streamKey: string): Promise<void> {
+    // 推流设置使用短连接，不影响点歌机已有的OBS连接与订阅。
+    const connection = new OBSWebSocket();
+    await configureOBSStreamConnection(
+      connection,
+      `ws://${this.config.address}:${this.config.port}`,
+      this.config.password,
+      server,
+      streamKey
+    );
   }
 
   // 获取当前场景名称

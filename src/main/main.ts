@@ -6,6 +6,10 @@ import windowStateKeeper from 'electron-window-state';
 import * as semver from 'semver';
 import { wsServer } from './websocket';
 import { WINDOW_CONFIG, GITHUB_CONFIG } from './config';
+import { pathToFileURL } from 'node:url';
+import { BILIBILI_LIVE_PAGE } from '../shared/streaming';
+import { installDevelopmentShutdown } from './developmentLifecycle';
+import { getWebUserAgent } from './userAgent';
 
 const initApp = () => {
   // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -19,6 +23,7 @@ const initApp = () => {
   let chatOverlayWindow: BrowserWindow | null = null;
   // 创建托盘变量
   let tray: Tray | null = null;
+  let isQuitting = false;
 
   // MARK: 设置自动更新服务
   const setupAutoUpdater = () => {
@@ -78,13 +83,7 @@ const initApp = () => {
     const contextMenu = Menu.buildFromTemplate([
       {
         label: '显示窗口',
-        click: () => {
-          if (mainWindow) {
-            mainWindow.show();
-          } else {
-            createWindow();
-          }
-        },
+        click: showMainWindow,
       },
       {
         label: '退出程序',
@@ -95,13 +94,7 @@ const initApp = () => {
     tray.setContextMenu(contextMenu);
 
     // 点击托盘图标显示窗口
-    tray.on('click', () => {
-      if (mainWindow) {
-        mainWindow.show();
-      } else {
-        createWindow();
-      }
-    });
+    tray.on('click', showMainWindow);
   };
 
   // MARK: 创建右键菜单函数
@@ -163,6 +156,55 @@ const initApp = () => {
       },
     });
 
+    mainWindow.webContents.on('will-attach-webview', (event, preferences, params) => {
+      if (params.src !== BILIBILI_LIVE_PAGE && preferences.preload !== livePagePreload) return;
+      if (params.src !== BILIBILI_LIVE_PAGE) {
+        event.preventDefault();
+        return;
+      }
+      preferences.preload = livePagePreload;
+      preferences.nodeIntegration = false;
+      preferences.nodeIntegrationInSubFrames = false;
+      preferences.contextIsolation = true;
+      preferences.sandbox = true;
+      preferences.webSecurity = true;
+    });
+    mainWindow.webContents.on('did-attach-webview', (_, guest) => {
+      guest.once('did-start-navigation', (_event, initialURL) => {
+        if (initialURL !== BILIBILI_LIVE_PAGE) return;
+        const isBilibiliURL = (value: string) => {
+          try {
+            const url = new URL(value);
+            return (
+              url.protocol === 'https:' && (url.hostname === 'bilibili.com' || url.hostname.endsWith('.bilibili.com'))
+            );
+          } catch {
+            return false;
+          }
+        };
+        guest.on('will-navigate', (event, url) => {
+          if (!isBilibiliURL(url)) event.preventDefault();
+        });
+        guest.setWindowOpenHandler(({ url }) =>
+          isBilibiliURL(url)
+            ? {
+                action: 'allow',
+                overrideBrowserWindowOptions: {
+                  autoHideMenuBar: true,
+                  webPreferences: {
+                    nodeIntegration: false,
+                    contextIsolation: true,
+                    sandbox: true,
+                    webSecurity: true,
+                    preload: undefined,
+                  },
+                },
+              }
+            : { action: 'deny' }
+        );
+      });
+    });
+
     // 启用内容保护，不会被OBS捕获到
     // mainWindow.setContentProtection(true);
 
@@ -176,13 +218,24 @@ const initApp = () => {
       mainWindow.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
     }
 
-    // 监听窗口关闭事件，直接最小化到托盘
+    // 关闭窗口时隐藏到托盘，退出应用时允许窗口正常关闭。
     mainWindow.on('close', event => {
-      if (mainWindow) {
+      if (!isQuitting && mainWindow) {
         event.preventDefault();
         mainWindow.hide();
       }
     });
+    mainWindow.on('closed', () => {
+      mainWindow = null;
+    });
+  };
+
+  const showMainWindow = () => {
+    if (isQuitting || !app.isReady()) return;
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    if (mainWindow?.isMinimized()) mainWindow.restore();
+    mainWindow?.show();
+    mainWindow?.focus();
   };
 
   // MARK: 创建弹幕浮层窗口
@@ -237,32 +290,38 @@ const initApp = () => {
 
   // MARK: 直接退出应用函数
   const quitApp = () => {
+    app.quit();
+  };
+
+  // Covers tray/UI exits, Cmd+Q, updates and development shutdown alike.
+  app.once('before-quit', () => {
+    isQuitting = true;
     console.log('正在退出程序...');
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.close();
-      mainWindow = null;
-    }
-
-    if (chatOverlayWindow && !chatOverlayWindow.isDestroyed()) {
-      chatOverlayWindow.close();
-      chatOverlayWindow = null;
-    }
-
-    if (!tray?.isDestroyed()) {
+    if (tray && !tray.isDestroyed()) {
       tray.destroy();
       tray = null;
     }
 
-    globalShortcut.unregisterAll();
+    if (app.isReady()) globalShortcut.unregisterAll();
 
     // 关闭 WebSocket 服务器
-    wsServer.stop();
+    void wsServer.stop().catch(error => console.error('关闭 WebSocket 服务器失败:', error));
+  });
 
-    app.quit();
-  };
+  if (!app.isPackaged && MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+    const dispose = installDevelopmentShutdown(quitApp);
+    app.once('before-quit', dispose);
+  }
 
   // MARK: 主窗口IPC事件
+  const livePagePreload = path.join(__dirname, 'preload-bilibili-live.js');
+  ipcMain.handle('streaming:get-page-config', event => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
+      return { success: false, error: '推流功能只能在主窗口中使用' };
+    }
+    return { success: true, data: { preload: pathToFileURL(livePagePreload).href } };
+  });
+
   // 处理登出请求，清除 bilibili 的 cookie
   ipcMain.on('app:logout', async () => {
     try {
@@ -488,10 +547,13 @@ const initApp = () => {
   // 执行更新安装（重启应用）
   ipcMain.handle('app:install-update', () => {
     try {
+      // quitAndInstall closes windows before emitting before-quit.
+      isQuitting = true;
       autoUpdater.quitAndInstall();
       quitApp();
       return { success: true };
     } catch (error) {
+      isQuitting = false;
       console.error('Error installing update:', error);
       return { success: false, error: error.message };
     }
@@ -528,6 +590,12 @@ const initApp = () => {
 
   // MARK: 应用事件
   app.on('ready', () => {
+    if (isQuitting) return;
+    // Apply before creating any windows: page scripts may build Request headers
+    // during initialization, before a did-finish-load injection can run.
+    app.userAgentFallback = getWebUserAgent(app.userAgentFallback, app.getName());
+    session.defaultSession.setUserAgent(app.userAgentFallback);
+
     // 全局移除菜单栏
     Menu.setApplicationMenu(null);
 
@@ -624,11 +692,7 @@ const initApp = () => {
     }
   });
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
+  app.on('activate', showMainWindow);
 };
 
 initApp();

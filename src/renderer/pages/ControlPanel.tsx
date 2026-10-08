@@ -3,6 +3,7 @@ import { useUserStore } from '../store/userStore';
 import { useSettingStore } from '../store/settingStore';
 import { Button, Spinner, TextField, Flex, Text, Separator, Callout, Badge, Box, Tooltip } from '@radix-ui/themes';
 import { WebviewTag } from 'electron';
+import StreamingControls from '../components/StreamingControls';
 
 // MARK: 控制台
 const ControlPanel: React.FC = () => {
@@ -64,8 +65,11 @@ const ControlPanel: React.FC = () => {
     const webview = webviewRef.current;
     if (!webview) return;
 
+    const zoom = () => webview.setZoomFactor(0.75);
+    webview.addEventListener('dom-ready', zoom);
     webview.addEventListener('did-finish-load', handleWebviewLoad);
     return () => {
+      webview.removeEventListener('dom-ready', zoom);
       webview.removeEventListener('did-finish-load', handleWebviewLoad);
     };
   }, [consoleConnected, handleWebviewLoad]);
@@ -137,15 +141,18 @@ const ControlPanel: React.FC = () => {
 
   if (!roomId) {
     return (
-      <Callout.Root color="blue" size="1" className="mb-3 !p-2">
-        <Callout.Text>
-          请先关联账号并在
-          <Badge color="indigo" variant="solid" ml="1" mr="1">
-            弹幕机
-          </Badge>
-          中同步设置
-        </Callout.Text>
-      </Callout.Root>
+      <Flex direction="column" gap="3" align="start">
+        <StreamingControls />
+        <Callout.Root color="blue" size="1" className="mb-3 !p-2">
+          <Callout.Text>
+            使用弹幕控制台，请先关联账号并在
+            <Badge color="indigo" variant="solid" ml="1" mr="1">
+              弹幕机
+            </Badge>
+            中同步设置
+          </Callout.Text>
+        </Callout.Root>
+      </Flex>
     );
   }
 
@@ -158,8 +165,8 @@ const ControlPanel: React.FC = () => {
         </Text>
         <Separator orientation="horizontal" className="flex-auto ml-2" />
       </Flex>
-      <Flex align="center" gap="2">
-        {!consoleConnected ? (
+      <Flex align="center" gap="2" wrap="wrap">
+        {!consoleConnected && (
           <>
             <Text>房间号</Text>
             <TextField.Root
@@ -170,16 +177,19 @@ const ControlPanel: React.FC = () => {
               value={localRoomId}
               onChange={e => setLocalRoomId(Number(e.target.value))}
             />
-            <Tooltip content="最好先开启 OBS 的 WebSocket 服务器，以便在控制台中便捷控制直播与场景" side="top">
-              <Button
-                variant="solid"
-                onClick={() => setConsoleConnected(!consoleConnected)}
-                disabled={!localRoomId && !roomId}
-              >
-                打开控制台并连接弹幕与 OBS
-              </Button>
-            </Tooltip>
           </>
+        )}
+        <StreamingControls />
+        {!consoleConnected ? (
+          <Tooltip content="最好先开启 OBS 的 WebSocket 服务器，以便在控制台中便捷控制直播与场景" side="top">
+            <Button
+              variant="solid"
+              onClick={() => setConsoleConnected(!consoleConnected)}
+              disabled={!localRoomId && !roomId}
+            >
+              打开控制台并连接弹幕与 OBS
+            </Button>
+          </Tooltip>
         ) : (
           <Button
             variant="solid"

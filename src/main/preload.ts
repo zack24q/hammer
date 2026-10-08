@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { StreamingResult } from '../shared/streaming';
 
 // 声明全局类型
 declare global {
@@ -17,6 +18,9 @@ type UpdateDownloadedInfo = {
 };
 
 interface ElectronAPI {
+  streaming: {
+    getPageConfig: () => Promise<StreamingResult<{ preload: string }>>;
+  };
   cookies: {
     getCookiesByDomains: (domains: string[]) => Promise<{
       success: boolean;
@@ -92,6 +96,9 @@ interface ElectronAPI {
 }
 
 const electronAPI: ElectronAPI = {
+  streaming: {
+    getPageConfig: () => ipcRenderer.invoke('streaming:get-page-config'),
+  },
   // Cookies相关操作
   cookies: {
     // 获取指定域名的cookies

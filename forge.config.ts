@@ -13,7 +13,7 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     icon: 'src/assets/icon.ico',
-    extraResource: ['src/assets/icon.ico'],
+    extraResource: ['src/assets/icon.ico', 'THIRD_PARTY_NOTICES.md'],
   },
   rebuildConfig: {},
   makers: [
@@ -53,6 +53,11 @@ const config: ForgeConfig = {
         },
         {
           entry: 'src/main/preload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
+        {
+          entry: { 'preload-bilibili-live': 'src/main/preload-bilibili-live.ts' },
           config: 'vite.preload.config.ts',
           target: 'preload',
         },

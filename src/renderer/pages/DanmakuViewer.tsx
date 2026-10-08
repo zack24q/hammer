@@ -14,6 +14,7 @@ import {
 } from '@radix-ui/themes';
 import { ReloadIcon, ClipboardCopyIcon } from '@radix-ui/react-icons';
 import { ConfigProps, uploadCookies } from '../services/cookies';
+import { buildLaplaceSettingsScript } from '../services/laplaceSettings';
 import { WebviewTag } from 'electron';
 import { useToast } from '../context/ToastContext';
 import { useSettingStore } from '../store/settingStore';
@@ -141,86 +142,35 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
   // };
 
   // 一键设置
-  const setOptions = () => {
+  const setOptions = async () => {
     const webview = webviewRef.current;
-    if (!webview) {
+    if (!webview || webviewLoading) {
       showToast('LAPLACE页面未加载完成', 'error');
       return;
     }
 
-    // 执行脚本获取localStorage中的配置并修改
-    const scriptToExecute = `
-      (function() {
-        try {
-          // 获取localStorage中的配置
-          const optionsStr = localStorage.getItem('laplaceChatOptions_v4');
-          if (!optionsStr) {
-            return { success: false, message: '未找到LAPLACE配置' };
-          }
+    const scriptToExecute = buildLaplaceSettingsScript({
+      roomId: String(roomId ?? ''),
+      userId: String(userId ?? ''),
+      username,
+      colorScheme: theme,
+      loginSyncToken: mergedToken,
+    });
 
-          // 解析配置
-          const options = JSON.parse(optionsStr);
-          
-          // 修改roomIds
-          options.json.roomIds = ['${roomId}'];
-          
-          // 修改colorScheme
-          options.json.colorScheme = '${theme}';
-          
-          // 修改loginSyncToken
-          options.json.loginSyncToken = '${mergedToken}';
-          
-          // 修改roomSearchHistory
-          if (!options.json.roomSearchHistory) {
-            options.json.roomSearchHistory = [];
-          }
-          
-          // 检查是否已存在相同roomId的记录
-          const existingIndex = options.json.roomSearchHistory.findIndex(item => item.value === '${roomId}');
-          
-          // 如果不存在，则添加新记录
-          if (existingIndex === -1) {
-            options.json.roomSearchHistory.push({
-              value: '${roomId}',
-              uid: '${userId}',
-              label: '${roomId}',
-              username: '${username}'
-            });
-          }
-          
-          // 保存回localStorage
-          localStorage.setItem('laplaceChatOptions_v4', JSON.stringify(options));
-
-          // 将tab设置为进阶
-          localStorage.setItem('laplaceChatActiveTab', '"advanced"');
-          
-          return { 
-            success: true, 
-            message: '已更新LAPLACE配置',
-          };
-        } catch (err) {
-          console.error('设置LAPLACE配置失败:', err);
-          return { success: false, message: '设置失败: ' + err.message };
-        }
-      })();
-    `;
-
-    webview
-      .executeJavaScript(scriptToExecute)
-      .then(result => {
-        if (result && result.success) {
-          webview.reload();
-          showToast(result.message, 'success');
-          console.log('LAPLACE配置已更新:', result);
-        } else {
-          showToast(result?.message || '设置失败', 'error');
-          console.error('设置LAPLACE配置失败:', result);
-        }
-      })
-      .catch(err => {
-        console.error('执行脚本失败:', err);
-        showToast('设置失败', 'error');
-      });
+    try {
+      const result = await webview.executeJavaScript(scriptToExecute);
+      if (result?.success) {
+        setWebviewLoading(true);
+        webview.reload();
+        showToast(result.message, 'success');
+      } else {
+        showToast(result?.message || '设置失败', 'error');
+        console.error('设置LAPLACE配置失败:', result);
+      }
+    } catch (error) {
+      console.error('执行脚本失败:', error);
+      showToast('设置失败', 'error');
+    }
   };
 
   // 合并同步登录状态和一键设置的功能
@@ -228,6 +178,15 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
     // 检查用户是否已登录
     if (!isLoggedIn) {
       showToast('请先关联账号', 'error');
+      return;
+    }
+
+    if (webviewLoading || !webviewRef.current) {
+      showToast('LAPLACE页面未加载完成', 'error');
+      return;
+    }
+    if (!roomId) {
+      showToast('未获取到有效的直播间号，请重新关联账号', 'error');
       return;
     }
 
@@ -247,7 +206,7 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
       // 如果同步成功，继续执行一键设置
       if (result.success) {
         showToast('登录状态同步成功', 'success');
-        setOptions();
+        await setOptions();
       } else {
         showToast(result.message, 'error');
       }
@@ -432,8 +391,11 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
     };
 
     if (webview) {
+      const zoom = () => webview.setZoomFactor(0.75);
+      webview.addEventListener('dom-ready', zoom);
       webview.addEventListener('did-finish-load', handleWebviewLoad);
       return () => {
+        webview.removeEventListener('dom-ready', zoom);
         webview.removeEventListener('did-finish-load', handleWebviewLoad);
       };
     }
