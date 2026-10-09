@@ -15,5 +15,5 @@ export const WINDOW_CONFIG = {
 // GitHub 相关配置
 export const GITHUB_CONFIG = {
   // GitHub 代理地址
-  PROXY: 'https://github.acmsz.top',
+  PROXY: 'https://gh-proxy.com',
 } as const;
