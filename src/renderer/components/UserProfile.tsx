@@ -53,7 +53,12 @@ const UserProfile: React.FC = () => {
                 <Text size="1">直播间ID: {roomId}</Text>
               </DropdownMenu.Label>
               <DropdownMenu.Separator />
-              <DropdownMenu.Item color="red" onClick={logout}>
+              <DropdownMenu.Item
+                color="red"
+                onClick={() => {
+                  logout().catch(error => showToast(error instanceof Error ? error.message : '退出登录失败', 'error'));
+                }}
+              >
                 退出登录
               </DropdownMenu.Item>
             </DropdownMenu.Content>

@@ -44,8 +44,16 @@ import {
   getUserPlaylists,
   Playlist,
   getPlaylistDetail,
-  Track,
 } from '../services/musicApi';
+
+import {
+  parseSongCommand,
+  getSkipSongAction,
+  selectNextSong,
+  resolveSongRequest,
+  convertTrackToSong,
+  createLatestSongLoader,
+} from '../services/songRequestLogic';
 
 // MARK: 点歌机
 const SongRequest: React.FC = () => {
@@ -53,6 +61,7 @@ const SongRequest: React.FC = () => {
 
   // 播放器
   const playerRef = useRef<APlayer | null>(null);
+  const songLoaderRef = useRef(createLatestSongLoader(getSongInfo));
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<'request' | 'default'>('default');
 
@@ -167,29 +176,20 @@ const SongRequest: React.FC = () => {
     const currentRequestPlaylist = getRequestPlaylist();
     const currentDefaultPlaylist = getDefaultPlaylist();
     const currentSong = getCurrentSong();
-    let nextSong: Song | null = null;
-
-    // 将当前播放的歌曲添加到历史记录
-    if (currentSong) {
-      addToPlayHistory(currentSong);
-    }
-
-    // 获取下一首歌曲
-    if (currentRequestPlaylist.length > 0) {
-      // 从点歌列表获取下一首
-      nextSong = currentRequestPlaylist[0];
-      setRequestPlaylist(currentRequestPlaylist.slice(1));
-    } else if (currentDefaultPlaylist.length > 0) {
-      // 从默认歌单获取下一首
-      const currentIndex = getDefaultPlaylistIndex();
-      const nextIndex = (currentIndex + 1) % currentDefaultPlaylist.length;
-      nextSong = currentDefaultPlaylist[nextIndex];
-      setDefaultPlaylistIndex(nextIndex);
+    if (currentSong) addToPlayHistory(currentSong);
+    const next = selectNextSong(currentRequestPlaylist, currentDefaultPlaylist, getDefaultPlaylistIndex());
+    const nextSong = next.song;
+    if (next.fromDefault) {
+      setDefaultPlaylistIndex(next.index);
       setActiveTab('default');
+    } else if (nextSong) {
+      setRequestPlaylist(next.requests);
     }
 
     // 检查是否还有歌曲可播
     if (!nextSong) {
+      songLoaderRef.current.cancel();
+      setIsGettingSongInfo(false);
       showToast('播放列表为空', 'info');
       setCurrentSong(null);
       return;
@@ -200,22 +200,20 @@ const SongRequest: React.FC = () => {
 
     // 获取播放链接并播放
     setIsGettingSongInfo(true);
-    getSongInfo(nextSong)
-      .then(songInfo => {
+    await songLoaderRef.current.load(nextSong, {
+      success: songInfo => {
         if (playerRef.current) {
           playerRef.current.list.clear();
           playerRef.current.list.add(songInfo);
-          if (!justLoad) {
-            playerRef.current.play();
-          }
+          if (!justLoad) playerRef.current.play();
         }
-        setIsGettingSongInfo(false);
-      })
-      .catch(error => {
+      },
+      error: error => {
         console.error('获取歌曲信息失败:', error);
         showToast('获取歌曲信息失败', 'error');
-        setIsGettingSongInfo(false);
-      });
+      },
+      finish: () => setIsGettingSongInfo(false),
+    });
   };
 
   // MARK: 开关弹幕点歌
@@ -259,29 +257,11 @@ const SongRequest: React.FC = () => {
       const content = event.message;
       if (!content) return;
 
-      // 检查是否是切歌指令
-      if (content.trim() === '切歌') {
-        console.log(`收到${event.username}的切歌请求`);
+      const command = parseSongCommand(content, getPrefixConfig());
+      if (command?.type === 'skip') {
         handleSkipSongRequest(event.username, event.userType);
-        return;
-      }
-
-      let source: string;
-      let keyword: string;
-
-      // 检查消息是否以配置的前缀开头
-      for (const [src, prefix] of Object.entries(getPrefixConfig())) {
-        if (content.startsWith(prefix)) {
-          source = src;
-          keyword = content.slice(prefix.length).trim();
-          break;
-        }
-      }
-
-      if (source && keyword) {
-        const requester = event.username;
-        console.log(`收到${requester}的弹幕点歌:`, source, keyword);
-        handleDanmuSongRequest(source, keyword, requester);
+      } else if (command?.type === 'request') {
+        handleDanmuSongRequest(command.source, command.keyword, event.username);
       }
     });
 
@@ -332,42 +312,9 @@ const SongRequest: React.FC = () => {
   // MARK: 处理弹幕点歌
   const handleDanmuSongRequest = async (source: string, keyword: string, requester = '[匿名]') => {
     try {
-      // 检查是否包含黑名单关键词
-      if (hasBlacklistedKeyword(keyword)) {
-        console.log(`已拦截黑名单关键词点歌: ${keyword}`);
-        showToast(`已拦截黑名单关键词点歌: ${keyword}`, 'error');
-        return;
-      }
-      // 检查点歌者
-      if (hasBlacklistedKeyword(requester)) {
-        console.log(`已拦截黑名单关键词点歌者: ${requester}`);
-        showToast(`已拦截黑名单关键词点歌者: ${requester}`, 'error');
-        return;
-      }
-      const results = await searchSongs(keyword, source as 'netease' | 'kuwo' | 'tidal' | 'joox');
-      if (results.length > 0) {
-        const song = {
-          ...results[0],
-          requester, // 添加点歌者信息
-        };
-        // 检查歌曲名
-        if (hasBlacklistedKeyword(song.name)) {
-          console.log(`已拦截黑名单关键词歌曲名: ${song.name}`);
-          showToast(`已拦截黑名单关键词歌曲名: ${song.name}`, 'error');
-          return;
-        }
-        // 检查歌手
-        const artistName = Array.isArray(song.artist) ? song.artist.join('/') : song.artist || '';
-        if (artistName && hasBlacklistedKeyword(artistName)) {
-          console.log(`已拦截黑名单关键词歌手: ${artistName}`);
-          showToast(`已拦截黑名单关键词歌手: ${artistName}`, 'error');
-          return;
-        }
-        addSongToRequestPlaylist(song);
-        showToast(`已添加${requester}的点歌: ${song.name} - ${artistName || '未知艺术家'}`, 'info');
-      } else {
-        showToast(`${requester}点歌未找到: ${keyword}`, 'error');
-      }
+      const result = await resolveSongRequest(source, keyword, requester, searchSongs, hasBlacklistedKeyword);
+      if (result.song) addSongToRequestPlaylist(result.song);
+      showToast(result.message, result.song ? 'info' : 'error');
     } catch (error) {
       console.error('Failed to process danmu song request:', error);
       showToast('弹幕点歌失败', 'error');
@@ -379,34 +326,13 @@ const SongRequest: React.FC = () => {
     const currentRequestPlaylist = getRequestPlaylist();
     const currentSong = getCurrentSong();
 
-    // 检查用户权限：主播(userType=100)或房管(userType=1)可以切任何歌
-    const isAuthorized = userType === 100 || userType === 1;
-
-    // 主播或房管可以直接切歌
-    if (currentSong && isAuthorized) {
-      showToast(`${username}(主播/房管)切掉当前歌曲: ${currentSong.name}`, 'info');
+    const action = getSkipSongAction(currentSong, currentRequestPlaylist, username, userType);
+    if (action.type === 'skip' && currentSong) {
+      showToast(`${username}${action.authorized ? '(主播/房管)' : ''}切掉当前歌曲: ${currentSong.name}`, 'info');
       playNextSong();
-      return;
-    }
-
-    // 防止正好有用户名字叫[系统]，可以切掉系统歌曲
-    if (currentSong.requester === '[系统]') {
-      return;
-    }
-
-    // 普通用户只能切自己点的歌
-    if (currentSong && currentSong.requester === username) {
-      // 切掉当前歌曲
-      showToast(`${username}切掉当前歌曲: ${currentSong.name}`, 'info');
-      playNextSong();
-      return;
-    }
-
-    // 检查点歌列表中是否有该用户点的歌，如果有则删除
-    const userSongIndex = currentRequestPlaylist.findIndex(song => song.requester === username);
-    if (userSongIndex !== -1) {
-      const removedSong = currentRequestPlaylist[userSongIndex];
-      removeSongFromRequestPlaylist(userSongIndex);
+    } else if (action.type === 'remove') {
+      const removedSong = currentRequestPlaylist[action.index];
+      removeSongFromRequestPlaylist(action.index);
       showToast(`已切掉${username}在点歌列表中的歌曲: ${removedSong.name}`, 'info');
     }
   };
@@ -475,7 +401,10 @@ const SongRequest: React.FC = () => {
   // 同步播放状态到obs服务中
   useEffect(() => {
     if (obsSyncEnabled) {
-      obsWebSocketService.updateSongRequestText(currentSong, requestPlaylist);
+      void obsWebSocketService.updateSongRequestText(currentSong, requestPlaylist).catch(error => {
+        console.error('同步OBS播放状态失败:', error);
+        showToast('同步OBS播放状态失败，请检查OBS连接和文字源', 'error');
+      });
     }
   }, [obsSyncEnabled, currentSong, requestPlaylist]);
 
@@ -502,19 +431,6 @@ const SongRequest: React.FC = () => {
     }
   };
 
-  // 将Track转换为Song
-  const convertTrackToSong = (track: Track): Song => {
-    return {
-      id: track.id.toString(),
-      name: track.name,
-      artist: track.ar.map(artist => artist.name),
-      album: track.al.name,
-      source: 'netease', // 网易云歌单的歌曲都是网易云源
-      pic_id: track.al.pic_str || track.al.pic.toString(),
-      lyric_id: track.id.toString(),
-    };
-  };
-
   // MARK: 通过歌单ID同步歌单
   const handleSyncPlaylistById = async (id: string | number) => {
     setIsSyncingPlaylist(true);
@@ -530,7 +446,7 @@ const SongRequest: React.FC = () => {
       // 更新固定歌单
       updateDefaultPlaylist(songs);
       // 持久化歌单ID
-      setSyncPlaylistId(localPlaylistId);
+      setSyncPlaylistId(String(id));
       // 关闭模态框
       setIsSyncDialogOpen(false);
       showToast(`成功同步歌单"${playlistDetail.name}"，共${songs.length}首歌曲`, 'success');
@@ -576,6 +492,7 @@ const SongRequest: React.FC = () => {
 
     // 清理函数
     return () => {
+      songLoaderRef.current.cancel();
       if (playerRef.current) {
         playerRef.current.destroy();
         playerRef.current = null;

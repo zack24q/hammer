@@ -19,14 +19,14 @@ interface OBSSource {
   sourceKind: string;
 }
 
-class OBSWebSocketService {
+export class OBSWebSocketService {
   private obs: OBSWebSocket;
   private config: OBSConfig;
   private isConnected = false;
   private sourceName = '锤子播放状态';
 
-  constructor() {
-    this.obs = new OBSWebSocket();
+  constructor(obs = new OBSWebSocket()) {
+    this.obs = obs;
     this.config = getInitialOBSConfig();
   }
 
@@ -65,7 +65,7 @@ class OBSWebSocketService {
     return this.isConnected;
   }
 
-  async configureStream(server: string, streamKey: string): Promise<void> {
+  async configureStream(server: string, streamKey: string, signal?: AbortSignal): Promise<void> {
     // 推流设置使用短连接，不影响点歌机已有的OBS连接与订阅。
     const connection = new OBSWebSocket();
     await configureOBSStreamConnection(
@@ -73,7 +73,9 @@ class OBSWebSocketService {
       `ws://${this.config.address}:${this.config.port}`,
       this.config.password,
       server,
-      streamKey
+      streamKey,
+      10000,
+      signal
     );
   }
 
@@ -164,39 +166,43 @@ class OBSWebSocketService {
     console.log(`文字源 "${sourceName}" 内容更新成功`);
   }
 
-  // 渲染模板
-  private renderTemplate(songInfo: Song, requestList: Song[], template: string, playlistTemplate: string): string {
-    const artist = Array.isArray(songInfo.artist) ? songInfo.artist.join(' / ') : songInfo.artist;
-
-    // 渲染点歌列表
-    let playlistText = '';
-    if (requestList.length > 0) {
-      playlistText = requestList
-        .map((song, index) => {
-          const songArtist = Array.isArray(song.artist) ? song.artist.join(' / ') : song.artist;
-          return playlistTemplate
-            .replace(/{序号}/g, (index + 1).toString())
-            .replace(/{歌曲名}/g, song.name || '[未知歌曲]')
-            .replace(/{歌手}/g, songArtist || '[未知歌手]')
-            .replace(/{点歌者}/g, song.requester || '[系统]');
-        })
-        .join('\n');
-    } else {
-      playlistText = '暂无点歌';
-    }
-
-    // 渲染主模板
-    return template
-      .replace(/{歌曲名}/g, songInfo.name || '[未知歌曲]')
-      .replace(/{歌手}/g, artist || '[未知歌手]')
-      .replace(/{点歌者}/g, songInfo.requester || '[系统]')
-      .replace(/{点歌列表}/g, playlistText);
+  // Replace only the original template tokens: metadata is always literal text.
+  private renderTemplate(
+    songInfo: Song | null,
+    requestList: Song[],
+    template: string,
+    playlistTemplate: string
+  ): string {
+    const render = (input: string, values: Record<string, string>) =>
+      input.replace(/{([^{}]+)}/g, (token, key: string) =>
+        Object.prototype.hasOwnProperty.call(values, key) ? values[key] : token
+      );
+    const artist = Array.isArray(songInfo?.artist) ? songInfo.artist.join(' / ') : songInfo?.artist;
+    const playlistText = requestList.length
+      ? requestList
+          .map((song, index) =>
+            render(playlistTemplate, {
+              序号: String(index + 1),
+              歌曲名: song.name || '[未知歌曲]',
+              歌手: (Array.isArray(song.artist) ? song.artist.join(' / ') : song.artist) || '[未知歌手]',
+              点歌者: song.requester || '[系统]',
+            })
+          )
+          .join('\n')
+      : '暂无点歌';
+    return render(template, {
+      歌曲名: songInfo?.name || '[未知歌曲]',
+      歌手: artist || '[未知歌手]',
+      点歌者: songInfo?.requester || '[系统]',
+      点歌列表: playlistText,
+    });
   }
 
   // 更新点歌机文字源内容
-  async updateSongRequestText(songInfo: Song, requestList: Song[]): Promise<void> {
-    const template = this.config.textTemplate;
-    const defaultPlaylistTemplate = this.config.playlistTemplate;
+  async updateSongRequestText(songInfo: Song | null, requestList: Song[]): Promise<void> {
+    const defaults = getInitialOBSConfig();
+    const template = this.config.textTemplate ?? defaults.textTemplate;
+    const defaultPlaylistTemplate = this.config.playlistTemplate ?? defaults.playlistTemplate;
     const text = this.renderTemplate(songInfo, requestList, template, defaultPlaylistTemplate);
 
     await this.updateTextSource(this.sourceName, text);

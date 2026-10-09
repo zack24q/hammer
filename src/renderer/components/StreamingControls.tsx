@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button, Callout, Dialog, Flex, IconButton, Spinner, Text, TextField, Tooltip } from '@radix-ui/themes';
 import { Cross2Icon } from '@radix-ui/react-icons';
-import type { WebviewTag, IpcMessageEvent, DidFailLoadEvent } from 'electron';
+import type { WebviewTag, IpcMessageEvent, DidFailLoadEvent, DidStartNavigationEvent } from 'electron';
 import { useUserStore } from '../store/userStore';
 import { useSettingStore } from '../store/settingStore';
 import { useToast } from '../context/ToastContext';
@@ -23,6 +23,7 @@ const StreamingControls: React.FC = () => {
   const [reloadVersion, setReloadVersion] = useState(0);
   const webviewRef = useRef<WebviewTag>(null);
   const accountRef = useRef(0);
+  const operationRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     accountRef.current += 1;
@@ -31,10 +32,19 @@ const StreamingControls: React.FC = () => {
     setShowKey(false);
     setError('');
     setBusy(false);
+    return () => {
+      accountRef.current += 1;
+      operationRef.current?.abort();
+      operationRef.current = null;
+    };
   }, [userId, isLoggedIn]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setCredentials(null);
+      setShowKey(false);
+      return;
+    }
     let disposed = false;
     setLoading(true);
     setReady(false);
@@ -63,16 +73,21 @@ const StreamingControls: React.FC = () => {
   useEffect(() => {
     const guest = webviewRef.current;
     if (!open || !preload || !guest) return;
+    let pageFailed = false;
+    const clearCredentials = () => {
+      operationRef.current?.abort();
+      setCredentials(null);
+      setShowKey(false);
+    };
     const message = (event: IpcMessageEvent) => {
       if (event.channel !== 'bilibili-live') return;
       // Only the dedicated preload in the official live center can publish these messages.
       const url = new URL(guest.getURL());
       if (url.origin !== 'https://link.bilibili.com' || url.pathname !== '/p/center/index') return;
       const data = event.args[0] as LivePageEvent;
-      if (data?.type === 'ready') setReady(true);
+      if (data?.type === 'ready' && !pageFailed) setReady(true);
       if (data?.type === 'clear') {
-        setCredentials(null);
-        setShowKey(false);
+        clearCredentials();
         setError('');
       }
       if (data?.type === 'error') setError(data.message);
@@ -84,8 +99,18 @@ const StreamingControls: React.FC = () => {
     };
     const zoom = () => guest.setZoomFactor(0.75);
     const loaded = () => setLoading(false);
+    const navigating = (event: DidStartNavigationEvent) => {
+      if (!event.isMainFrame || event.isInPlace) return;
+      pageFailed = false;
+      clearCredentials();
+      setLoading(true);
+      setReady(false);
+      setError('');
+    };
     const failed = (event: DidFailLoadEvent) => {
       if (!event.isMainFrame || event.errorCode === -3) return;
+      pageFailed = true;
+      clearCredentials();
       setLoading(false);
       setReady(false);
       setError(`开播页面加载失败：${event.errorDescription}，请点击重新加载`);
@@ -93,31 +118,39 @@ const StreamingControls: React.FC = () => {
     guest.addEventListener('ipc-message', message);
     guest.addEventListener('dom-ready', zoom);
     guest.addEventListener('did-stop-loading', loaded);
+    guest.addEventListener('did-start-navigation', navigating);
     guest.addEventListener('did-fail-load', failed);
     return () => {
       guest.removeEventListener('ipc-message', message);
       guest.removeEventListener('dom-ready', zoom);
       guest.removeEventListener('did-stop-loading', loaded);
+      guest.removeEventListener('did-start-navigation', navigating);
       guest.removeEventListener('did-fail-load', failed);
     };
   }, [open, preload]);
 
-  const run = async (operation: () => Promise<void>) => {
-    if (busy) return;
+  const run = async (operation: (signal: AbortSignal) => Promise<void>) => {
+    if (operationRef.current) return;
+    const controller = new AbortController();
+    operationRef.current = controller;
     const account = accountRef.current;
     setBusy(true);
     setError('');
     try {
-      await operation();
+      await operation(controller.signal);
     } catch (error) {
-      if (accountRef.current === account) setError(error instanceof Error ? error.message : '操作失败，请重试');
+      if (accountRef.current === account && !controller.signal.aborted)
+        setError(error instanceof Error ? error.message : '操作失败，请重试');
     } finally {
-      if (accountRef.current === account) setBusy(false);
+      if (operationRef.current === controller) {
+        operationRef.current = null;
+        setBusy(false);
+      }
     }
   };
 
   const configureOBS = () =>
-    run(async () => {
+    run(async signal => {
       if (!credentials) return;
       const account = accountRef.current;
       if (
@@ -129,8 +162,9 @@ const StreamingControls: React.FC = () => {
         throw new Error('请填写有效的OBS地址和端口（1到65535）');
       }
       obsWebSocketService.setConfig(obsConfig);
-      await obsWebSocketService.configureStream(credentials.server, credentials.streamKey);
-      if (accountRef.current === account) showToast('已写入OBS，请在OBS中点击「开始直播」', 'success');
+      await obsWebSocketService.configureStream(credentials.server, credentials.streamKey, signal);
+      if (accountRef.current === account && !signal.aborted)
+        showToast('已写入OBS，请在OBS中点击「开始直播」', 'success');
     });
 
   const copy = async (value: string, label: string) => {

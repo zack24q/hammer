@@ -10,6 +10,8 @@ import { pathToFileURL } from 'node:url';
 import { BILIBILI_LIVE_PAGE } from '../shared/streaming';
 import { installDevelopmentShutdown } from './developmentLifecycle';
 import { getWebUserAgent } from './userAgent';
+import { clearBilibiliCookies } from './bilibiliSession';
+import { createChatOverlayController } from './chatOverlay';
 
 const initApp = () => {
   // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -17,10 +19,39 @@ const initApp = () => {
     return;
   }
 
+  // A hidden-to-tray instance still owns the development servers and the
+  // WebSocket port. Starting another Electron process would otherwise make
+  // Vite choose 5175/5176 while the main process keeps loading 5173/5174.
+  // Reuse the existing instance and bring its window back instead.
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
+
   // 存储当前主窗口引用
   let mainWindow: BrowserWindow | null = null;
   // 存储chatOverlay窗口引用
   let chatOverlayWindow: BrowserWindow | null = null;
+  const overlayController = createChatOverlayController((window, sensor) => {
+    if (CHAT_OVERLAY_WINDOW_VITE_DEV_SERVER_URL) {
+      const url = new URL(CHAT_OVERLAY_WINDOW_VITE_DEV_SERVER_URL);
+      if (sensor) url.searchParams.set('sensor', '1');
+      void window.loadURL(url.href);
+    } else {
+      void window.loadFile(path.join(__dirname, `../renderer/${CHAT_OVERLAY_WINDOW_VITE_NAME}/index.html`), {
+        query: sensor ? { sensor: '1' } : {},
+      });
+    }
+  });
+  // Electron 36 can select XWayland before ready to support Linux native overlays.
+  if (
+    process.platform === 'linux' &&
+    process.env.XDG_SESSION_TYPE === 'wayland' &&
+    process.env.CHAT_OVERLAY_ALLOW_WAYLAND !== '1' &&
+    !app.commandLine.hasSwitch('ozone-platform')
+  ) {
+    app.commandLine.appendSwitch('ozone-platform', 'x11');
+  }
   // 创建托盘变量
   let tray: Tray | null = null;
   let isQuitting = false;
@@ -143,6 +174,10 @@ const initApp = () => {
       y: windowState.y,
       width: windowState.width,
       height: windowState.height,
+      // Show only after the first page has finished loading. This prevents macOS
+      // from presenting a half-created window and then routing its early close
+      // event through the tray-hide handler.
+      show: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         // 启用webview的支持
@@ -219,10 +254,22 @@ const initApp = () => {
     }
 
     // 关闭窗口时隐藏到托盘，退出应用时允许窗口正常关闭。
+    // During initial loading, keep the window alive if macOS emits an early
+    // close request; the tray app must not start with an invisible main window.
+    let mainWindowHasShown = false;
+    const revealMainWindow = () => {
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindowHasShown) return;
+      mainWindowHasShown = true;
+      mainWindow.show();
+      mainWindow.focus();
+    };
+    mainWindow.once('ready-to-show', revealMainWindow);
+    mainWindow.webContents.once('did-finish-load', revealMainWindow);
     mainWindow.on('close', event => {
       if (!isQuitting && mainWindow) {
         event.preventDefault();
-        mainWindow.hide();
+        if (!mainWindowHasShown) revealMainWindow();
+        else mainWindow.hide();
       }
     });
     mainWindow.on('closed', () => {
@@ -251,9 +298,11 @@ const initApp = () => {
       y: windowState.y,
       width: windowState.width,
       height: windowState.height,
+      minWidth: 320,
+      minHeight: 64,
       transparent: true,
       frame: false,
-      alwaysOnTop: true,
+      alwaysOnTop: false,
       hasShadow: false,
       skipTaskbar: true,
       webPreferences: {
@@ -264,8 +313,9 @@ const initApp = () => {
     });
 
     // 启用内容保护，不会被OBS捕获到
-    // chatOverlayWindow.setContentProtection(true);
+    // overlayController.setContentProtection(true);
 
+    overlayController.attach(chatOverlayWindow);
     windowState.manage(chatOverlayWindow);
 
     // 监听窗口关闭事件，通知主窗口更新状态
@@ -323,16 +373,14 @@ const initApp = () => {
   });
 
   // 处理登出请求，清除 bilibili 的 cookie
-  ipcMain.on('app:logout', async () => {
+  ipcMain.handle('app:logout', async () => {
     try {
-      const cookies = await session.defaultSession.cookies.get({ domain: 'bilibili.com' });
-      for (const cookie of cookies) {
-        const url = `https://${cookie.domain}${cookie.path}`;
-        await session.defaultSession.cookies.remove(url, cookie.name);
-      }
+      await clearBilibiliCookies(session.defaultSession.cookies);
       console.log('Bilibili cookies cleared successfully');
+      return { success: true };
     } catch (error) {
       console.error('Error clearing cookies:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -389,7 +437,7 @@ const initApp = () => {
 
       // 应用内容保护设置
       if (contentProtectionEnabled) {
-        chatOverlayWindow.setContentProtection(true);
+        overlayController.setContentProtection(true);
         console.log('已应用弹幕浮层窗口内容保护设置');
       }
 
@@ -470,7 +518,7 @@ const initApp = () => {
   ipcMain.handle('chat-overlay:set-content-protection', (event, enabled: boolean) => {
     try {
       if (chatOverlayWindow && !chatOverlayWindow.isDestroyed()) {
-        chatOverlayWindow.setContentProtection(enabled);
+        overlayController.setContentProtection(enabled);
         return { success: true };
       }
       return { success: false, error: 'Chat overlay window not found or destroyed' };
@@ -559,35 +607,6 @@ const initApp = () => {
     }
   });
 
-  // MARK: 弹幕浮层窗口IPC事件
-  // Handle opacity changes
-  ipcMain.on('set-window-opacity', (event, opacity) => {
-    chatOverlayWindow?.setOpacity(opacity);
-  });
-
-  // Handle always on top toggle
-  ipcMain.on('set-always-on-top', (event, enabled) => {
-    chatOverlayWindow?.setAlwaysOnTop(enabled);
-  });
-
-  // Handle click pass-through toggle
-  ipcMain.on('set-click-through', (event, enabled) => {
-    if (enabled) {
-      // Don't make the entire window click-through immediately
-      // Instead, let the renderer handle mouse tracking
-      chatOverlayWindow?.webContents.send('click-through-enabled', true);
-    } else {
-      // Disable click pass-through
-      chatOverlayWindow?.setIgnoreMouseEvents(false);
-      chatOverlayWindow?.webContents.send('click-through-enabled', false);
-    }
-  });
-
-  // Handle mouse enter/leave events for click-through mode
-  ipcMain.on('set-ignore-mouse-events', (event, ignore) => {
-    chatOverlayWindow?.setIgnoreMouseEvents(ignore, { forward: true });
-  });
-
   // MARK: 应用事件
   app.on('ready', () => {
     if (isQuitting) return;
@@ -669,7 +688,7 @@ const initApp = () => {
     });
 
     // 启动 WebSocket 服务器
-    wsServer.start();
+    void wsServer.start().catch(error => console.error('启动 WebSocket 服务器失败:', error));
 
     createTray();
     createWindow();
@@ -680,6 +699,11 @@ const initApp = () => {
 
   // 为所有新建的webContents添加右键菜单
   app.on('web-contents-created', (_, webContents) => {
+    // A remote page's unload confirmation must not veto an explicit app exit,
+    // including termination of the development launcher.
+    webContents.on('will-prevent-unload', event => {
+      if (isQuitting) event.preventDefault();
+    });
     webContents.on('context-menu', () => {
       createContextMenu(webContents).popup();
     });
@@ -693,6 +717,11 @@ const initApp = () => {
   });
 
   app.on('activate', showMainWindow);
+
+  app.on('second-instance', () => {
+    if (app.isReady()) showMainWindow();
+    else app.once('ready', showMainWindow);
+  });
 };
 
 initApp();

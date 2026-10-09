@@ -12,6 +12,7 @@ export class WebSocketServer {
   private nextId = 1;
   private debug: boolean;
   private authToken: string;
+  private stopping: Promise<void> | null = null;
 
   /**
    * 启动 WebSocket 服务器
@@ -20,12 +21,13 @@ export class WebSocketServer {
    * @param debug 是否启用调试模式
    */
   public start(port = 9696, host = 'localhost', authToken = '', debug = false): Promise<void> {
+    if (this.wss || this.stopping) return Promise.reject(new Error('WebSocket服务器已启动或正在关闭'));
     this.debug = debug;
     this.authToken = authToken;
 
     return new Promise((resolve, reject) => {
       try {
-        this.wss = new WSServer({
+        const server = new WSServer({
           port,
           host,
           clientTracking: true,
@@ -41,8 +43,23 @@ export class WebSocketServer {
           },
         });
 
+        this.wss = server;
+        let started = false;
+        server.once('listening', () => {
+          started = true;
+          resolve();
+        });
+        server.on('error', error => {
+          this.log(`服务错误: ${error.message}`);
+          if (!started) {
+            if (this.wss === server) this.wss = null;
+            reject(error);
+          }
+        });
+        server.once('close', () => {
+          if (!started) reject(new Error('WebSocket服务器在启动完成前关闭'));
+        });
         this.setupEventHandlers();
-        resolve();
       } catch (error) {
         this.log(`服务启动失败: ${error}`);
         reject(error);
@@ -54,25 +71,27 @@ export class WebSocketServer {
    * 停止 WebSocket 服务器
    */
   public stop(): Promise<void> {
-    return new Promise(resolve => {
-      if (!this.wss) {
-        resolve();
-        return;
-      }
-
-      // 关闭所有客户端连接
-      this.clients.forEach(client => {
-        client.conn.close();
-      });
-      this.clients.clear();
-
-      // 关闭服务器
-      this.wss.close(() => {
-        this.wss = null;
+    if (this.stopping) return this.stopping;
+    const server = this.wss;
+    if (!server) return Promise.resolve();
+    this.clients.clear();
+    this.stopping = new Promise<void>(resolve => {
+      for (const socket of server.clients) socket.close();
+      // A stalled peer may never acknowledge the close frame.
+      const timer = setTimeout(() => {
+        for (const socket of server.clients) socket.terminate();
+      }, 500);
+      timer.unref();
+      server.close(() => {
+        clearTimeout(timer);
+        if (this.wss === server) this.wss = null;
         this.log('WebSocket 服务器已停止');
         resolve();
       });
+    }).finally(() => {
+      this.stopping = null;
     });
+    return this.stopping;
   }
 
   /**

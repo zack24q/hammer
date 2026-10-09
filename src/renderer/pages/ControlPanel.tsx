@@ -2,18 +2,29 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useUserStore } from '../store/userStore';
 import { useSettingStore } from '../store/settingStore';
 import { Button, Spinner, TextField, Flex, Text, Separator, Callout, Badge, Box, Tooltip } from '@radix-ui/themes';
-import { WebviewTag } from 'electron';
+import type { WebviewTag, DidFailLoadEvent, DidStartNavigationEvent } from 'electron';
 import StreamingControls from '../components/StreamingControls';
 
 // MARK: 控制台
 const ControlPanel: React.FC = () => {
   const { roomId } = useUserStore();
   const webviewRef = useRef<WebviewTag>(null);
+  const pageFailedRef = useRef(false);
   const [webviewLoading, setWebviewLoading] = useState(true);
+  const [webviewError, setWebviewError] = useState('');
   const { consoleConnected, setConsoleConnected, contentProtection } = useSettingStore();
   const [localRoomId, setLocalRoomId] = useState<number>();
   const [chatOverlayOpen, setChatOverlayOpen] = useState(false);
   const [closingChatOverlay, setClosingChatOverlay] = useState(false);
+
+  useEffect(() => {
+    // A connection and manually selected room belong to the previous account.
+    setConsoleConnected(false);
+    setLocalRoomId(undefined);
+    setWebviewLoading(true);
+    setWebviewError('');
+    pageFailedRef.current = false;
+  }, [roomId, setConsoleConnected]);
 
   // 注入并初始化 event_bridge_settings 的代码
   const injectEventBridgeSettings = useCallback((webview: WebviewTag) => {
@@ -51,9 +62,10 @@ const ControlPanel: React.FC = () => {
   // 处理 webview 加载完成事件
   const handleWebviewLoad = useCallback(() => {
     const webview = webviewRef.current;
-    if (!webview) return;
+    if (!webview || pageFailedRef.current) return;
     console.log('控制台webview加载完成');
     setWebviewLoading(false);
+    setWebviewError('');
     // 注入 event_bridge_settings 初始化代码
     injectEventBridgeSettings(webview);
   }, [injectEventBridgeSettings]);
@@ -66,13 +78,29 @@ const ControlPanel: React.FC = () => {
     if (!webview) return;
 
     const zoom = () => webview.setZoomFactor(0.75);
+    const navigating = (event: DidStartNavigationEvent) => {
+      if (!event.isMainFrame || event.isInPlace) return;
+      pageFailedRef.current = false;
+      setWebviewLoading(true);
+      setWebviewError('');
+    };
+    const failed = (event: DidFailLoadEvent) => {
+      if (!event.isMainFrame || event.errorCode === -3) return;
+      pageFailedRef.current = true;
+      setWebviewLoading(false);
+      setWebviewError(`控制台页面加载失败：${event.errorDescription}`);
+    };
     webview.addEventListener('dom-ready', zoom);
+    webview.addEventListener('did-start-navigation', navigating);
+    webview.addEventListener('did-fail-load', failed);
     webview.addEventListener('did-finish-load', handleWebviewLoad);
     return () => {
       webview.removeEventListener('dom-ready', zoom);
+      webview.removeEventListener('did-start-navigation', navigating);
+      webview.removeEventListener('did-fail-load', failed);
       webview.removeEventListener('did-finish-load', handleWebviewLoad);
     };
-  }, [consoleConnected, handleWebviewLoad]);
+  }, [consoleConnected, handleWebviewLoad, roomId]);
 
   // 打开弹幕悬浮框
   const handleOpenChatOverlay = async () => {
@@ -206,6 +234,14 @@ const ControlPanel: React.FC = () => {
           </Button>
         )}
       </Flex>
+      {webviewError && (
+        <Callout.Root color="red" mt="2">
+          <Callout.Text>{webviewError}</Callout.Text>
+          <Button variant="soft" onClick={() => webviewRef.current?.reload()}>
+            重新加载
+          </Button>
+        </Callout.Root>
+      )}
     </Box>
   );
 

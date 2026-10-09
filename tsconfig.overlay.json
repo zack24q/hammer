@@ -1,0 +1,13 @@
+{
+  "extends": "./chat-overlay/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["chat-overlay/src/*"]
+    },
+    "types": ["node", "vite/client"],
+    "ignoreDeprecations": "6.0"
+  },
+  "include": ["chat-overlay/src/**/*", "chat-overlay/forge.env.d.ts", "src/main/chatOverlay.ts"],
+  "exclude": ["chat-overlay/src/main.ts", "node_modules", "out", ".vite"]
+}

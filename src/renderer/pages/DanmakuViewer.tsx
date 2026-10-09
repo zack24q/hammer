@@ -15,7 +15,7 @@ import {
 import { ReloadIcon, ClipboardCopyIcon } from '@radix-ui/react-icons';
 import { ConfigProps, uploadCookies } from '../services/cookies';
 import { buildLaplaceSettingsScript } from '../services/laplaceSettings';
-import { WebviewTag } from 'electron';
+import type { WebviewTag, DidFailLoadEvent, DidStartNavigationEvent } from 'electron';
 import { useToast } from '../context/ToastContext';
 import { useSettingStore } from '../store/settingStore';
 import { useUserStore } from '../store/userStore';
@@ -30,6 +30,10 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
   const webviewRef = useRef<WebviewTag>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [webviewLoading, setWebviewLoading] = useState(true);
+  const [webviewError, setWebviewError] = useState('');
+  const pageReadyRef = useRef(false);
+  const pageFailedRef = useRef(false);
+  const syncingRef = useRef(false);
   const { showToast } = useToast();
   const { roomId, userId, username } = useUserStore();
   const { theme } = useSettingStore();
@@ -144,7 +148,7 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
   // 一键设置
   const setOptions = async () => {
     const webview = webviewRef.current;
-    if (!webview || webviewLoading) {
+    if (!webview || !pageReadyRef.current || new URL(webview.getURL()).origin !== new URL(url).origin) {
       showToast('LAPLACE页面未加载完成', 'error');
       return;
     }
@@ -160,6 +164,7 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
     try {
       const result = await webview.executeJavaScript(scriptToExecute);
       if (result?.success) {
+        pageReadyRef.current = false;
         setWebviewLoading(true);
         webview.reload();
         showToast(result.message, 'success');
@@ -181,7 +186,8 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
       return;
     }
 
-    if (webviewLoading || !webviewRef.current) {
+    if (syncingRef.current) return;
+    if (!pageReadyRef.current || !webviewRef.current) {
       showToast('LAPLACE页面未加载完成', 'error');
       return;
     }
@@ -190,6 +196,7 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
       return;
     }
 
+    syncingRef.current = true;
     setIsLoading(true);
     try {
       const configData: ConfigProps = {
@@ -197,11 +204,17 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
         password: danmakuConfig.password,
       };
 
-      console.log('开始上传Cookie数据, 配置:', configData);
-
       const result = await uploadCookies(configData);
-
-      console.log('上传结果:', result);
+      const currentUser = useUserStore.getState();
+      if (
+        !currentUser.isLoggedIn ||
+        currentUser.userId !== userId ||
+        currentUser.roomId !== roomId ||
+        useSettingStore.getState().getMergedToken() !== mergedToken
+      ) {
+        showToast('账号或同步密钥已变更，请重新同步', 'error');
+        return;
+      }
 
       // 如果同步成功，继续执行一键设置
       if (result.success) {
@@ -214,6 +227,7 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
       console.error('同步过程中出错:', error);
       showToast(`同步失败: ${error}`, 'error');
     } finally {
+      syncingRef.current = false;
       setIsLoading(false);
     }
   };
@@ -224,9 +238,9 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
   };
 
   // 复制到剪贴板
-  const copyToClipboard = () => {
+  const copyToClipboard = async () => {
     try {
-      navigator.clipboard.writeText(mergedToken);
+      await navigator.clipboard.writeText(mergedToken);
       showToast('已复制密钥到剪贴板', 'success');
     } catch (err) {
       console.error('复制失败:', err);
@@ -287,6 +301,8 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
     const webview = webviewRef.current;
 
     const handleWebviewLoad = () => {
+      // Chromium also finishes loading its internal error page after a failure.
+      if (pageFailedRef.current) return;
       // laplace的配置初始值
       // const options = {
       //   json: {
@@ -387,19 +403,39 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
       // `);
 
       console.log('弹幕机webview加载完成');
+      pageReadyRef.current = true;
+      setWebviewError('');
       setWebviewLoading(false);
     };
 
     if (webview) {
       const zoom = () => webview.setZoomFactor(0.75);
+      const navigating = (event: DidStartNavigationEvent) => {
+        if (!event.isMainFrame || event.isInPlace) return;
+        pageReadyRef.current = false;
+        pageFailedRef.current = false;
+        setWebviewLoading(true);
+        setWebviewError('');
+      };
+      const failed = (event: DidFailLoadEvent) => {
+        if (!event.isMainFrame || event.errorCode === -3) return;
+        pageReadyRef.current = false;
+        pageFailedRef.current = true;
+        setWebviewLoading(false);
+        setWebviewError(`弹幕配置页面加载失败：${event.errorDescription}`);
+      };
       webview.addEventListener('dom-ready', zoom);
+      webview.addEventListener('did-start-navigation', navigating);
+      webview.addEventListener('did-fail-load', failed);
       webview.addEventListener('did-finish-load', handleWebviewLoad);
       return () => {
         webview.removeEventListener('dom-ready', zoom);
+        webview.removeEventListener('did-start-navigation', navigating);
+        webview.removeEventListener('did-fail-load', failed);
         webview.removeEventListener('did-finish-load', handleWebviewLoad);
       };
     }
-  }, []);
+  }, [url]);
 
   // 渲染操作模块
   const renderOperationSection = () => (
@@ -420,14 +456,18 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
               </IconButton>
             </Tooltip>
             <Tooltip content="重新生成密钥">
-              <IconButton size="1" variant="ghost" color="red" onClick={generateNewIds}>
+              <IconButton size="1" variant="ghost" color="red" onClick={generateNewIds} disabled={isLoading}>
                 <ReloadIcon />
               </IconButton>
             </Tooltip>
           </TextField.Slot>
         </TextField.Root>
         <Tooltip content="同步登录状态后，自动在 LAPLACE 中完成配置">
-          <Button onClick={handleSyncAndSetOptions} variant="solid" disabled={isLoading}>
+          <Button
+            onClick={handleSyncAndSetOptions}
+            variant="solid"
+            disabled={isLoading || webviewLoading || !!webviewError}
+          >
             <Spinner size="1" loading={isLoading} />
             {isLoading ? '同步中' : '一键同步并设置'}
           </Button>
@@ -448,6 +488,14 @@ const DanmakuViewer: React.FC<DanmakuViewerProps> = ({ url = 'https://chat.lapla
           </Button>
         </Tooltip>
       </Flex>
+      {webviewError && (
+        <Callout.Root color="red" mt="2">
+          <Callout.Text>{webviewError}</Callout.Text>
+          <Button variant="soft" disabled={isLoading} onClick={() => webviewRef.current?.reload()}>
+            重新加载
+          </Button>
+        </Callout.Root>
+      )}
     </Box>
   );
 

@@ -9,48 +9,11 @@ const { OBSWebSocket } = require('obs-websocket-js/json');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const ts = require('typescript');
-const { installBilibiliLivePage } = require('../src/main/bilibiliLivePage.ts');
+const { livePageFixture } = require('./helpers/live-page.cjs');
 const { configureOBSStreamConnection } = require('../src/renderer/services/obsStreaming.ts');
 
-function xhrFixture() {
-  class XHR {
-    open(method, url) {
-      this.method = method;
-      this.url = url;
-      this.headers = {};
-    }
-    send(body) {
-      this.body = body;
-    }
-    setRequestHeader(name, value) {
-      name = name.toLowerCase();
-      this.headers[name] = this.headers[name] ? `${this.headers[name]}, ${value}` : value;
-    }
-    get responseText() {
-      return '';
-    }
-    get response() {
-      return null;
-    }
-    addEventListener() {}
-    removeEventListener() {}
-  }
-  vm.runInNewContext(`(${installBilibiliLivePage.toString()})()`, {
-    window: { fetch() {}, hammerLivePage: { sign: () => 'test-sign', publish() {} } },
-    location: { origin: 'https://link.bilibili.com', href: 'https://link.bilibili.com/p/center/index' },
-    XMLHttpRequest: XHR,
-    URL,
-    URLSearchParams,
-    FormData,
-    Request,
-    Response,
-    document: { addEventListener() {} },
-  });
-  return XHR;
-}
-
 test('XHR start rewrites content type once, preserves other headers and resets hooks on reuse', () => {
-  const XHR = xhrFixture();
+  const { XHR } = livePageFixture();
   for (const contentType of ['application/json', 'application/x-www-form-urlencoded', null]) {
     const xhr = new XHR();
     xhr.open('POST', 'https://api.live.bilibili.com/xlive/app-blink/v1/streaming/WebLiveCenterStartLive');
@@ -70,6 +33,41 @@ test('XHR start rewrites content type once, preserves other headers and resets h
     assert.equal(xhr.headers['content-type'], 'application/json');
     assert.equal(xhr.body, '{"keep":true}');
   }
+});
+
+test('XHR upstream lookup uses the room ID in the POST body and preserves request headers', () => {
+  const { XHR } = livePageFixture();
+  const xhr = new XHR();
+  xhr.open('POST', 'https://api.live.bilibili.com/xlive/app-blink/v1/live/FetchWebUpStreamAddr');
+  xhr.setRequestHeader('X-Test', 'keep');
+  xhr.send('room_id=456');
+  assert.equal(xhr.method, 'GET');
+  assert.equal(new URL(xhr.url).pathname, '/live_stream/v1/StreamList/get_stream_by_roomId');
+  assert.equal(new URL(xhr.url).searchParams.get('room_id'), '456');
+  assert.equal(xhr.headers['x-test'], 'keep');
+  assert.equal(xhr.body, null);
+
+  xhr.open('POST', 'https://api.live.bilibili.com/xlive/app-blink/v1/live/FetchWebUpStreamAddr');
+  xhr.send('room_id=789');
+  assert.equal(new URL(xhr.url).searchParams.get('room_id'), '789');
+});
+
+test('Fetch start preserves extra headers while replacing the content type', async () => {
+  let captured;
+  const { window } = livePageFixture(async (input, init) => {
+    captured = { input, init };
+    return new Response('{"code":0,"data":{}}');
+  });
+  await window.fetch(
+    new Request('https://api.live.bilibili.com/xlive/app-blink/v1/streaming/WebLiveCenterStartLive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Test': 'keep' },
+      body: '{"room_id":123,"csrf":"test-csrf","area_v2":1}',
+    })
+  );
+  assert.equal(new Headers(captured.init.headers).get('x-test'), 'keep');
+  assert.equal(new Headers(captured.init.headers).get('content-type'), 'application/x-www-form-urlencoded');
+  assert.equal(captured.init.body.get('room_id'), '123');
 });
 
 test('the actual streaming webview JSX renders allowpopups into the DOM', () => {
@@ -195,4 +193,57 @@ test('a late status response after timeout cannot write stream settings', async 
   resolveStatus({ outputActive: false });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(requests, ['GetStreamStatus']);
+});
+
+test('cancelling an OBS operation rejects promptly and prevents a late write', async () => {
+  const obs = new EventEmitter();
+  const requests = [];
+  let resolveStatus;
+  obs.connect = async () => {};
+  obs.disconnect = async () => {};
+  obs.call = async type => {
+    requests.push(type);
+    return new Promise(resolve => {
+      resolveStatus = resolve;
+    });
+  };
+  const controller = new AbortController();
+  const operation = configureOBSStreamConnection(
+    obs,
+    'ws://example.test',
+    undefined,
+    'rtmp://example.test/live',
+    'test-key',
+    1000,
+    controller.signal
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new Error('account changed'));
+  await assert.rejects(operation, /account changed/);
+  resolveStatus({ outputActive: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests, ['GetStreamStatus']);
+  assert.equal(obs.listenerCount('ConnectionClosed'), 0);
+  assert.equal(obs.listenerCount('ConnectionError'), 0);
+});
+
+test('an already cancelled OBS operation never opens a connection', async () => {
+  const controller = new AbortController();
+  controller.abort(new Error('page closed'));
+  await assert.rejects(
+    configureOBSStreamConnection(
+      {
+        connect() {
+          assert.fail('must not connect');
+        },
+      },
+      'ws://example.test',
+      undefined,
+      'rtmp://example.test/live',
+      'test-key',
+      1000,
+      controller.signal
+    ),
+    /page closed/
+  );
 });

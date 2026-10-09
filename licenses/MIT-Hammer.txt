@@ -1,13 +1,6 @@
-# Third-party notices
-
-The Bilibili live-page adapter in `src/main/bilibiliLivePage.ts` adapts the
-protocol used by [ProgramRipper/BLiveWeb](https://github.com/ProgramRipper/BLiveWeb).
-
-## BLiveWeb
-
 MIT License
 
-Copyright (c) 2023 ProgramRipper
+Copyright (c) Hammer contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -26,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-
-## LAPLACE Chat Overlay
-
-Source: https://github.com/laplace-live/chat-overlay
-Version: 1.1.1, upstream master commit f94091413d50b0d53f666b6aa9d94b83b886b0c2 (2026-09-08).
-Copyright: LAPLACE Chat Overlay contributors.
-License: GNU Affero General Public License version 3 (AGPL-3.0); full text in LICENSE.
-
-Hammer embeds its renderer and preload, and adapts its native window controls.
-The root project provides Electron build and native-window integration around the
-unmodified submodule.
-The combined distribution is provided under AGPL-3.0. Original Hammer code retains
-its MIT grant (licenses/MIT-Hammer.txt). See source-distribution.md for source delivery.

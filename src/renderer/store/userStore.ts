@@ -25,12 +25,13 @@ interface UserState {
   // 清除登录状态
   clearLoginState: () => void;
   // 退出登录
-  logout: () => void;
+  logout: () => Promise<void>;
   // 检查现有登录状态
   refreshUserData: () => Promise<boolean>;
 }
 
 const USER_STORAGE_KEY = 'user-store';
+let loginRevision = 0;
 
 // 创建用户状态管理store
 export const useUserStore = create<UserState>()(
@@ -38,45 +39,54 @@ export const useUserStore = create<UserState>()(
     (set, get) => ({
       isLoggedIn: false,
       username: '',
-      userId: null,
+      userId: null as number | null,
       avatar: '',
-      roomId: null,
+      roomId: null as number | null,
 
-      setLoginState: (isLoggedIn, username, userId, avatar, roomId = null) =>
+      setLoginState: (isLoggedIn, username, userId, avatar, roomId = null) => {
+        loginRevision += 1;
         set({
           isLoggedIn,
           username,
           userId,
           avatar,
           roomId,
-        }),
+        });
+      },
 
-      clearLoginState: () =>
+      clearLoginState: () => {
+        loginRevision += 1;
         set({
           isLoggedIn: false,
           username: '',
           userId: null,
           avatar: '',
           roomId: null,
-        }),
+        });
+      },
 
-      logout: () => {
+      logout: async () => {
+        const revision = ++loginRevision;
         // 清除 bilibili cookie
         if (window.electron) {
-          window.electron.app.logout();
+          const result = await window.electron.app.logout();
+          if (!result.success) throw new Error(result.error || '清除登录状态失败，请重试');
         }
         // 重置状态
-        get().clearLoginState();
+        if (revision === loginRevision) get().clearLoginState();
       },
 
       // 刷新用户信息和直播间信息
       refreshUserData: async () => {
+        const revision = ++loginRevision;
         try {
           const userInfo = await BilibiliService.getUserInfo();
+          if (revision !== loginRevision) return false;
 
           // 如果已登录，接着获取直播间信息
           if (userInfo?.isLogin) {
             const liveRoomInfo = await BilibiliService.getLiveRoomInfo(userInfo.mid);
+            if (revision !== loginRevision) return false;
             set({
               isLoggedIn: true,
               username: userInfo.uname,
@@ -91,6 +101,7 @@ export const useUserStore = create<UserState>()(
             return false;
           }
         } catch (error) {
+          if (revision !== loginRevision) return false;
           console.error('验证登录状态失败', error);
           // 出错时也更新为未登录状态
           get().clearLoginState();

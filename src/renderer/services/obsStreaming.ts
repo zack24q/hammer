@@ -24,8 +24,10 @@ export async function configureOBSStreamConnection(
   password: string | undefined,
   server: string,
   streamKey: string,
-  timeoutMs = 10000
+  timeoutMs = 10000,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted();
   const controller = new AbortController();
   let rejectFailure: (error: Error) => void;
   const failure = new Promise<never>((_resolve, reject) => {
@@ -37,6 +39,8 @@ export async function configureOBSStreamConnection(
   };
   const closed = () => fail(new Error('OBS连接已断开，请检查OBS后重试'));
   const errored = (error: Error) => fail(new Error(error.message || 'OBS连接失败，请重试'));
+  const aborted = () => fail(signal?.reason ?? new Error('OBS设置已取消'));
+  signal?.addEventListener('abort', aborted, { once: true });
   obs.on('ConnectionClosed', closed);
   obs.on('ConnectionError', errored);
   const timer = setTimeout(() => fail(new Error('OBS设置超时，请检查连接后重试')), timeoutMs);
@@ -52,6 +56,7 @@ export async function configureOBSStreamConnection(
     ]);
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', aborted);
     controller.abort();
     obs.off('ConnectionClosed', closed);
     obs.off('ConnectionError', errored);
@@ -60,7 +65,7 @@ export async function configureOBSStreamConnection(
     let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        obs.disconnect().catch(() => undefined),
+        obs.disconnect().catch((): void => undefined),
         new Promise<void>(resolve => {
           cleanupTimer = setTimeout(resolve, 1000);
         }),

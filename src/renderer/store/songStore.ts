@@ -96,6 +96,7 @@ export const useSongStore = create<SongState>()(
         }));
       },
       removeFromDefaultPlaylist: index => {
+        if (!Number.isInteger(index) || index < 0 || index >= get().defaultPlaylist.length) return;
         set(state => {
           const newPlaylist = [...state.defaultPlaylist];
           newPlaylist.splice(index, 1);
@@ -116,6 +117,7 @@ export const useSongStore = create<SongState>()(
         });
       },
       setDefaultPlaylistIndex: index => {
+        if (!Number.isInteger(index) || index < 0 || index >= get().defaultPlaylist.length) return;
         set({ defaultPlaylistIndex: index });
       },
       resetDefaultPlaylistIndex: () => {
@@ -129,6 +131,15 @@ export const useSongStore = create<SongState>()(
         defaultPlaylist: state.defaultPlaylist,
         defaultPlaylistIndex: state.defaultPlaylistIndex,
       }),
+      onRehydrateStorage: () => state => {
+        if (
+          state &&
+          (!Number.isInteger(state.defaultPlaylistIndex) ||
+            state.defaultPlaylistIndex < 0 ||
+            state.defaultPlaylistIndex >= state.defaultPlaylist.length)
+        )
+          state.resetDefaultPlaylistIndex();
+      },
     }
   )
 );

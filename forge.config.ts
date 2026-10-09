@@ -1,4 +1,7 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { version } from './package.json';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 // import { MakerZIP } from '@electron-forge/maker-zip';
 // import { MakerDeb } from '@electron-forge/maker-deb';
@@ -12,9 +15,24 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     icon: 'src/assets/icon.ico',
-    extraResource: ['src/assets/icon.ico', 'THIRD_PARTY_NOTICES.md'],
+    extraResource: [
+      'src/assets/icon.ico',
+      'THIRD_PARTY_NOTICES.md',
+      'LICENSE',
+      'licenses',
+      'docs/source-distribution.md',
+    ],
   },
   rebuildConfig: {},
+  hooks: {
+    // Attach complete corresponding source to the same release as the installers.
+    postMake: async (_forgeConfig, results) => {
+      execFileSync(process.execPath, [path.join(__dirname, 'scripts/source-archive.cjs')], { stdio: 'inherit' });
+      const archive = path.join(__dirname, 'out', `hammer-source-${version}.tar.gz`);
+      for (const result of results) result.artifacts.push(archive);
+      return results;
+    },
+  },
   makers: [
     new MakerSquirrel({
       title: '锤子',
@@ -74,7 +92,7 @@ const config: ForgeConfig = {
         },
         {
           name: 'chat_overlay_window',
-          config: 'vite.renderer-chat-overlay.config.ts',
+          config: 'vite.renderer-chat-overlay.config.mts',
         },
       ],
     }),

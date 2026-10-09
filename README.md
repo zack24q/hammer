@@ -58,4 +58,5 @@
 
 ## 许可证
 
-MIT
+集成最新版 LAPLACE Chat Overlay 的整体分发采用 AGPL-3.0，原有锤子代码保留 MIT 授权。
+详见 [第三方声明](THIRD_PARTY_NOTICES.md) 与 [源码交付说明](docs/source-distribution.md)。

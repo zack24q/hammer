@@ -158,11 +158,14 @@ export function installBilibiliLivePage() {
       return nativeOpen.call(this, method, input, async ?? true, username, password);
     let active = request(method.toUpperCase(), url);
     nativeOpen.call(this, active.method, active.url.href, async ?? true, username, password);
-    if (active.url.pathname === startPath && active.method === 'POST') {
+    const headers: [string, string][] = [];
+    if ((active.url.pathname === startPath && active.method === 'POST') || url.pathname === upstreamPath) {
       // setRequestHeader appends values; discard the page's content type before
       // setting the form content type once in send(). Preserve all other headers.
-      this.setRequestHeader = (name, value) => {
-        if (name.toLowerCase() !== 'content-type') nativeSetRequestHeader.call(this, name, value);
+      this.setRequestHeader = (name: string, value: string) => {
+        if (active.url.pathname === startPath && name.toLowerCase() === 'content-type') return;
+        nativeSetRequestHeader.call(this, name, value);
+        headers.push([name, value]);
       };
     }
     let transformed = '';
@@ -193,6 +196,16 @@ export function installBilibiliLivePage() {
     loadListeners.set(this, loaded);
     this.addEventListener('load', loaded, { once: true });
     this.send = (body?: Document | XMLHttpRequestBodyInit | null) => {
+      if (url.pathname === upstreamPath) {
+        // The room ID may only arrive in send(), or differ from the last room.
+        const updated = request(method.toUpperCase(), url, body);
+        if (updated.method !== active.method || updated.url.href !== active.url.href) {
+          nativeOpen.call(this, updated.method, updated.url.href, async ?? true, username, password);
+          for (const [name, value] of headers) nativeSetRequestHeader.call(this, name, value);
+        }
+        active = updated;
+        return nativeSend.call(this, active.body as XMLHttpRequestBodyInit | null);
+      }
       // open() had no body; recompute the start payload after send() supplies it.
       if (active.url.pathname === startPath && method.toUpperCase() === 'POST') {
         active = request(method.toUpperCase(), url, body);
@@ -224,6 +237,8 @@ export function installBilibiliLivePage() {
             ...init,
           }
         : init;
+    const headers = new Headers(options?.headers);
+    if (changed && active.method === 'POST') headers.set('Content-Type', 'application/x-www-form-urlencoded');
     const response = await nativeFetch(
       changed ? active.url.href : input,
       changed
@@ -232,8 +247,7 @@ export function installBilibiliLivePage() {
             method: active.method,
             body: active.body as BodyInit | null,
             credentials: 'include',
-            headers:
-              active.method === 'POST' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : options?.headers,
+            headers,
           }
         : init
     );

@@ -22,20 +22,9 @@ export interface ConfigProps {
 
 // 获取指定域名的cookies
 export const getCookiesByDomains = async (domains: string[]): Promise<Record<string, Electron.Cookie[]>> => {
-  try {
-    // 使用preload脚本提供的API从main进程获取cookies
-    const result = await window.electron.cookies.getCookiesByDomains(domains);
-
-    if (result && result.success) {
-      return result.data || {};
-    } else {
-      console.error('获取cookies失败:', result.error);
-      return {};
-    }
-  } catch (error) {
-    console.error('Error getting cookies:', error);
-    return {};
-  }
+  const result = await window.electron.cookies.getCookiesByDomains(domains);
+  if (!result.success) throw new Error(result.error || '获取登录状态失败，请重试');
+  return result.data || {};
 };
 
 // 上传cookies到服务器
@@ -50,6 +39,9 @@ export const uploadCookies = async (config: ConfigProps): Promise<{ success: boo
 
     // 获取cookies
     const cookieData = await getCookiesByDomains(domains);
+    if (!Object.values(cookieData).some(cookies => cookies.length > 0)) {
+      return { success: false, message: '未获取到登录状态，请重新关联账号' };
+    }
 
     // 加密数据
     const key = CryptoJS.MD5(uuid + '-' + password)
@@ -57,11 +49,6 @@ export const uploadCookies = async (config: ConfigProps): Promise<{ success: boo
       .substring(0, 16);
 
     const dataToEncrypt = JSON.stringify({ cookie_data: cookieData });
-
-    console.log('上传的数据:', {
-      cookies: cookieData,
-      total_data_size_kb: Math.round(dataToEncrypt.length / 1024),
-    });
 
     const encrypted = CryptoJS.AES.encrypt(dataToEncrypt, key).toString();
 
@@ -88,6 +75,7 @@ export const uploadCookies = async (config: ConfigProps): Promise<{ success: boo
       headers,
       // 确保axios正确处理二进制数据
       responseType: 'json',
+      timeout: 15000,
     });
 
     if (response.data && response.data.action === 'done') {
@@ -113,7 +101,7 @@ export const uploadCookies = async (config: ConfigProps): Promise<{ success: boo
       };
     }
   } catch (error) {
-    console.error('Upload cookies error:', error);
+    console.error('Upload cookies error:', error instanceof Error ? error.message : String(error));
     return {
       success: false,
       message: `上传出错: ${error instanceof Error ? error.message : String(error)}`,
